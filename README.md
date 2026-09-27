@@ -1,7 +1,8 @@
 # Heart Rate Monitor
 
-Apple Watch → Health app → Health Auto Export (iPhone) → iCloud Drive → this
-Mac → trend dashboard + daily reports, pushed to this (private) repo.
+Apple Watch → Health app → Health Auto Export (iPhone) → iPhone Shortcut
+uploads the CSV to this (private) repo → GitHub Actions builds the trend
+dashboard + daily reports.
 
 ## How data gets here
 
@@ -24,46 +25,29 @@ once-a-day `Resting Heart Rate (bpm)`. Columns are matched by exact name after
 stripping the unit, so look-alikes such as `Walking Heart Rate Average` or
 `Heart Rate Variability` are never picked up.
 
-## Daily automation (8:00 AM)
+## Automation: iPhone → GitHub (no Mac needed)
 
-A launchd job runs `scripts/daily.py` every day at 8:00 AM (or when the Mac
-wakes, if it was asleep). It:
+1. **iPhone Shortcut** (`shortcut/Upload HR to GitHub.shortcut`) uploads the
+   newest file in `Daily hr` to `incoming/` in this repo through the GitHub
+   API. A Shortcuts automation runs it when Health Auto Export is closed, so
+   opening the app for the export also sends the file.
+2. **GitHub Actions** (`.github/workflows/process-upload.yml`) runs on every
+   push that adds a CSV to `incoming/`: ingest → dashboard → reports, then
+   commits `reports/`, `data/`, `dashboard/` and `incoming/processed/` back
+   to `main`. See the repo's **Actions** tab for runs.
 
-1. Looks for new entries in the iCloud folder above: a file with no copy in
-   `incoming/processed/`, or whose contents changed since it was last read.
-2. If there are none, logs "No new entry" and stops.
-3. Otherwise copies them into `incoming/`, runs `update_dashboard.py`
-   (ingest → dashboard → reports), then commits `reports/`, `data/`,
-   `dashboard/` and `incoming/processed/` as "Daily update YYYY-MM-DD" and
-   pushes to GitHub. If the push fails, the commit stays local and goes out
-   with the next successful push.
+**Shortcut setup**: open the `.shortcut` file on the iPhone → Add Shortcut.
+On import it asks for a fine-grained GitHub token (only `hr-mon`,
+*Contents: Read and write*) and the folder (iCloud Drive → Health Auto
+Export → Daily hr). The token stays on the phone. Then Shortcuts →
+Automation → + → App → Health Auto Export → *Is Closed* → Run Immediately →
+this shortcut. `shortcut/build_shortcut.py` regenerates the file (macOS).
 
-Output goes to `logs/daily.log` (not committed).
-
-```bash
-# run it now, exactly as the 8 AM trigger would
-launchctl kickstart gui/$(id -u)/com.hrmon.daily
-
-# see whether it's loaded and how the last run exited
-launchctl print gui/$(id -u)/com.hrmon.daily | grep -E "state|last exit"
-
-# install (the job definition lives in launchd/)
-cp launchd/com.hrmon.daily.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hrmon.daily.plist
-
-# remove
-launchctl bootout gui/$(id -u)/com.hrmon.daily
-rm ~/Library/LaunchAgents/com.hrmon.daily.plist
-```
-
-If the log shows `Operation not permitted` / `Can't read the export folder`,
-give `/opt/anaconda3/bin/python3.12` Full Disk Access in System Settings →
-Privacy & Security.
+After the workflow runs, `git pull` before working locally.
 
 ## Running by hand
 
 ```bash
-python3 scripts/daily.py            # same as the scheduled job
 python3 scripts/update_dashboard.py # just process whatever is in incoming/
 open dashboard/index.html
 ```
@@ -82,15 +66,13 @@ hr-mon/
 │   ├── daily_stats.csv    <- one row per day (avg/min/max/resting/stdev/samples/7-day avg)
 │   └── YYYY-MM-DD.md      <- one summary per day
 ├── scripts/
-│   ├── daily.py              <- the 8 AM job: check iCloud, update, commit, push
 │   ├── ingest.py             <- merges incoming/*.csv into data/heart_rate_master.csv
 │   ├── build_dashboard.py    <- reads the master csv, writes dashboard/index.html
 │   ├── report.py             <- reads the master csv, writes reports/
 │   ├── update_dashboard.py   <- runs ingest, build_dashboard, report in order
 │   └── generate_sample_data.py  <- fake data in the old single-column format (no longer ingested)
-├── launchd/
-│   └── com.hrmon.daily.plist <- the 8 AM job definition
-└── logs/daily.log     <- job output (gitignored)
+├── shortcut/          <- the iPhone upload Shortcut + its builder
+└── .github/workflows/process-upload.yml  <- processes uploads on GitHub
 ```
 
 ## Notes
