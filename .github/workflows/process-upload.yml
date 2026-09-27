@@ -1,5 +1,7 @@
 # Runs the pipeline whenever the iPhone Shortcut uploads a CSV to incoming/:
 # ingest -> dashboard -> reports, then commits the results back to main.
+# An upload that adds no new data is removed from history instead, so
+# re-uploads of the same file leave no commits behind.
 # Commits pushed with GITHUB_TOKEN don't trigger workflows, so this can't loop.
 name: Process upload
 
@@ -27,6 +29,7 @@ jobs:
           # latest main, not the triggering commit: runs are queued one at a
           # time, so this includes the previous run's results
           ref: main
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -35,16 +38,37 @@ jobs:
       - name: Ingest, rebuild dashboard, write reports
         run: python scripts/update_dashboard.py
 
-      - name: Commit and push results
+      - name: Commit results, or drop an upload that added nothing
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898732+github-actions[bot]@users.noreply.github.com"
-          git add -A incoming reports data dashboard
-          if git diff --cached --quiet; then
-            echo "Nothing changed."
+
+          if ! git diff --quiet -- data reports; then
+            git add -A incoming reports data dashboard
+            git commit -m "Process upload $(date +%Y-%m-%d)"
+            # another upload may have landed while this ran
+            git pull --rebase
+            git push
             exit 0
           fi
-          git commit -m "Process upload $(date +%Y-%m-%d)"
-          # another upload may have landed while this ran
-          git pull --rebase
-          git push
+
+          echo "No new data."
+          git checkout -- dashboard   # only its "generated at" time changed
+          upload=$(git rev-parse HEAD)
+          other_files=$(git diff-tree --no-commit-id --name-only -r HEAD | grep -v '^incoming/[^/]*\.csv$' || true)
+          if [ "$(git log -1 --format=%an)" != "github-actions[bot]" ] && [ -z "$other_files" ]; then
+            # The latest commit only uploaded CSVs that added nothing: remove
+            # it. The lease makes this a no-op if another upload landed since;
+            # that upload's own run then clears incoming/.
+            git reset -q --hard HEAD~1
+            git push --force-with-lease=main:$upload origin HEAD:main \
+              && echo "Removed upload commit ${upload:0:7}." \
+              || echo "A newer upload arrived; leaving history as is."
+          else
+            git add -A incoming
+            if ! git diff --cached --quiet; then
+              git commit -m "Clear processed uploads"
+              git pull --rebase
+              git push
+            fi
+          fi
