@@ -3,10 +3,15 @@
 build_dashboard.py
 
 Reads ../data/heart_rate_master.csv, computes daily trend stats
-(average / min / max / a resting-HR proxy / 7-day rolling average /
-variability), and writes a fully self-contained ../dashboard/index.html
-(inline SVG charts, no external JS/CSS libraries, works fully offline —
-just double-click the file to open it in a browser).
+(average / min / max / resting HR / 7-day rolling average / variability),
+and writes a fully self-contained ../dashboard/index.html (inline SVG
+charts, no external JS/CSS libraries — works fully offline).
+
+Resting HR: uses Apple's own "Resting Heart Rate" reading for that day
+when the export included it (real Apple-computed value). Falls back to
+an approximation (mean of the lowest ~10% of that day's Heart Rate
+samples) only for days where no real resting-HR reading is present.
+Each day's row is labeled so you always know which kind you're looking at.
 
 Run:
     python3 build_dashboard.py
@@ -14,25 +19,12 @@ Run:
 import csv
 import statistics
 from collections import defaultdict
-from datetime import datetime, date, timedelta
+from datetime import datetime
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent.parent
 MASTER_PATH = BASE / "data" / "heart_rate_master.csv"
 DASHBOARD_PATH = BASE / "dashboard" / "index.html"
-
-# ---- palette (validated set, see dataviz skill references/palette.md) ----
-COLORS = {
-    "series_1_blue": {"light": "#2a78d6", "dark": "#3987e5"},
-    "series_3_aqua": {"light": "#1baf7a", "dark": "#199e70"},
-    "surface": {"light": "#fcfcfb", "dark": "#1a1a19"},
-    "page": {"light": "#f9f9f7", "dark": "#0d0d0d"},
-    "text_primary": {"light": "#0b0b0b", "dark": "#ffffff"},
-    "text_secondary": {"light": "#52514e", "dark": "#c3c2b7"},
-    "muted": {"light": "#898781", "dark": "#898781"},
-    "gridline": {"light": "#e1e0d9", "dark": "#2c2c2a"},
-    "baseline": {"light": "#c3c2b7", "dark": "#383835"},
-}
 
 MAX_DAYS_SHOWN = 30
 
@@ -46,18 +38,22 @@ def load_master():
         for row in reader:
             try:
                 ts = datetime.strptime(row["timestamp"], "%Y-%m-%d %H:%M:%S")
-                hr = int(round(float(row["heart_rate"])))
-                rows.append((ts, hr))
             except (ValueError, KeyError):
                 continue
+            hr_raw = (row.get("heart_rate") or "").strip()
+            rhr_raw = (row.get("resting_heart_rate") or "").strip()
+            hr = int(round(float(hr_raw))) if hr_raw else None
+            rhr = int(round(float(rhr_raw))) if rhr_raw else None
+            if hr is None and rhr is None:
+                continue
+            rows.append((ts, hr, rhr))
     rows.sort(key=lambda r: r[0])
     return rows
 
 
 def resting_proxy(values):
-    """Approximate resting HR: mean of the lowest 10% of samples that day
-    (minimum 3 samples). This is a simple proxy, not Apple's own resting-HR
-    algorithm, and is labeled as such in the dashboard."""
+    """Approximate resting HR when Apple's own reading isn't present:
+    mean of the lowest 10% of that day's HR samples (minimum 3 samples)."""
     if not values:
         return None
     n = max(3, len(values) // 10)
@@ -66,28 +62,46 @@ def resting_proxy(values):
 
 
 def compute_daily_stats(rows):
-    by_day = defaultdict(list)
-    for ts, hr in rows:
-        by_day[ts.date()].append(hr)
+    hr_by_day = defaultdict(list)
+    rhr_by_day = defaultdict(list)
+    for ts, hr, rhr in rows:
+        d = ts.date()
+        if hr is not None:
+            hr_by_day[d].append(hr)
+        if rhr is not None:
+            rhr_by_day[d].append(rhr)
 
-    days = sorted(by_day.keys())
+    days = sorted(set(hr_by_day.keys()) | set(rhr_by_day.keys()))
     stats = []
     for d in days:
-        values = by_day[d]
+        hr_values = hr_by_day.get(d, [])
+        rhr_values = rhr_by_day.get(d, [])
+
+        if rhr_values:
+            resting_value = round(statistics.mean(rhr_values), 1)
+            resting_is_real = True
+        elif hr_values:
+            resting_value = resting_proxy(hr_values)
+            resting_is_real = False
+        else:
+            resting_value = None
+            resting_is_real = False
+
         stats.append({
             "date": d,
-            "avg": round(statistics.mean(values), 1),
-            "min": min(values),
-            "max": max(values),
-            "resting": resting_proxy(values),
-            "samples": len(values),
-            "stdev": round(statistics.pstdev(values), 1) if len(values) > 1 else 0.0,
+            "avg": round(statistics.mean(hr_values), 1) if hr_values else None,
+            "min": min(hr_values) if hr_values else None,
+            "max": max(hr_values) if hr_values else None,
+            "resting": resting_value,
+            "resting_is_real": resting_is_real,
+            "samples": len(hr_values),
+            "stdev": round(statistics.pstdev(hr_values), 1) if len(hr_values) > 1 else 0.0,
         })
 
-    # 7-day rolling average of the daily average
+    # 7-day rolling average of the daily average (skip days with no HR data)
     for i, s in enumerate(stats):
-        window = stats[max(0, i - 6):i + 1]
-        s["rolling_avg"] = round(statistics.mean(w["avg"] for w in window), 1)
+        window = [w for w in stats[max(0, i - 6):i + 1] if w["avg"] is not None]
+        s["rolling_avg"] = round(statistics.mean(w["avg"] for w in window), 1) if window else None
 
     return stats
 
@@ -100,8 +114,7 @@ def scale(value, domain_min, domain_max, range_min, range_max):
 
 
 def build_trend_chart(stats, chart_id="trendChart"):
-    """Line chart: min-max band + daily avg line + 7-day rolling avg line."""
-    shown = stats[-MAX_DAYS_SHOWN:]
+    shown = [s for s in stats[-MAX_DAYS_SHOWN:] if s["avg"] is not None]
     if not shown:
         return "<p class='empty'>No data yet.</p>"
 
@@ -124,7 +137,6 @@ def build_trend_chart(stats, chart_id="trendChart"):
     def y_at(v):
         return pad_t + plot_h - scale(v, y_min, y_max, 0, plot_h)
 
-    # band path (min/max range)
     top_pts = [(x_at(i), y_at(s["max"])) for i, s in enumerate(shown)]
     bot_pts = [(x_at(i), y_at(s["min"])) for i, s in enumerate(shown)]
     band_path = "M " + " L ".join(f"{x:.1f},{y:.1f}" for x, y in top_pts)
@@ -134,10 +146,12 @@ def build_trend_chart(stats, chart_id="trendChart"):
     avg_pts = [(x_at(i), y_at(s["avg"])) for i, s in enumerate(shown)]
     avg_path = "M " + " L ".join(f"{x:.1f},{y:.1f}" for x, y in avg_pts)
 
-    roll_pts = [(x_at(i), y_at(s["rolling_avg"])) for i, s in enumerate(shown)]
-    roll_path = "M " + " L ".join(f"{x:.1f},{y:.1f}" for x, y in roll_pts)
+    roll_shown = [(i, s) for i, s in enumerate(shown) if s["rolling_avg"] is not None]
+    roll_path = ""
+    if roll_shown:
+        roll_pts = [(x_at(i), y_at(s["rolling_avg"])) for i, s in roll_shown]
+        roll_path = "M " + " L ".join(f"{x:.1f},{y:.1f}" for x, y in roll_pts)
 
-    # gridlines (4 horizontal bands)
     gridlines = []
     n_grid = 4
     for gi in range(n_grid + 1):
@@ -150,7 +164,6 @@ def build_trend_chart(stats, chart_id="trendChart"):
             f'text-anchor="end">{round(v)}</text>'
         )
 
-    # x-axis labels: first, middle, last date
     x_labels = []
     label_idxs = sorted(set([0, n // 2, n - 1]))
     for i in label_idxs:
@@ -160,15 +173,15 @@ def build_trend_chart(stats, chart_id="trendChart"):
             f'text-anchor="middle">{d.strftime("%b %d")}</text>'
         )
 
-    # hover points (invisible-ish circles with tooltip data-attrs)
     hover_points = []
     for i, s in enumerate(shown):
         x = x_at(i)
         y = y_at(s["avg"])
+        resting_label = f"{s['resting']} bpm" + ("" if s["resting_is_real"] else " (est.)")
         label = (
             f"{s['date'].strftime('%a %b %d')} — "
             f"avg {s['avg']} bpm, range {s['min']}-{s['max']}, "
-            f"7d avg {s['rolling_avg']}, resting~{s['resting']}"
+            f"7d avg {s['rolling_avg']}, resting {resting_label}"
         )
         hover_points.append(
             f'<circle class="hoverpoint" cx="{x:.1f}" cy="{y:.1f}" r="10" '
@@ -182,7 +195,7 @@ def build_trend_chart(stats, chart_id="trendChart"):
   {"".join(gridlines)}
   <path d="{band_path}" class="band-fill" />
   <path d="{avg_path}" class="line-avg" fill="none" />
-  <path d="{roll_path}" class="line-rolling" fill="none" />
+  {f'<path d="{roll_path}" class="line-rolling" fill="none" />' if roll_path else ''}
   {"".join(x_labels)}
   {"".join(hover_points)}
 </svg>
@@ -191,10 +204,9 @@ def build_trend_chart(stats, chart_id="trendChart"):
 
 
 def build_intraday_chart(rows, day, chart_id="intradayChart"):
-    """Line chart of raw samples for a single day."""
-    samples = [(ts, hr) for ts, hr in rows if ts.date() == day]
+    samples = [(ts, hr) for ts, hr, _rhr in rows if ts.date() == day and hr is not None]
     if not samples:
-        return "<p class='empty'>No samples for this day.</p>"
+        return "<p class='empty'>No heart-rate samples for this day.</p>"
 
     W, H = 720, 220
     pad_l, pad_r, pad_t, pad_b = 46, 16, 16, 32
@@ -241,7 +253,7 @@ def build_intraday_chart(rows, day, chart_id="intradayChart"):
         )
 
     hover_points = []
-    step = max(1, len(samples) // 60)  # thin out hover targets on dense days
+    step = max(1, len(samples) // 60)
     for i in range(0, len(samples), step):
         ts, hr = samples[i]
         x, y = x_at(ts), y_at(hr)
@@ -267,26 +279,34 @@ def build_intraday_chart(rows, day, chart_id="intradayChart"):
 def build_table(stats):
     rows_html = []
     for s in reversed(stats[-14:]):
+        resting_cell = "—" if s["resting"] is None else (
+            f"{s['resting']}" if s["resting_is_real"] else f"{s['resting']}~"
+        )
+        avg_cell = s["avg"] if s["avg"] is not None else "—"
+        min_cell = s["min"] if s["min"] is not None else "—"
+        max_cell = s["max"] if s["max"] is not None else "—"
         rows_html.append(
             f"<tr><td>{s['date'].strftime('%a %b %d')}</td>"
-            f"<td>{s['avg']}</td><td>{s['min']}</td><td>{s['max']}</td>"
-            f"<td>{s['resting']}</td><td>{s['stdev']}</td>"
+            f"<td>{avg_cell}</td><td>{min_cell}</td><td>{max_cell}</td>"
+            f"<td>{resting_cell}</td><td>{s['stdev']}</td>"
             f"<td>{s['samples']}</td></tr>"
         )
     return "".join(rows_html)
 
 
 def build_stat_tiles(stats):
-    if not stats:
+    with_avg = [s for s in stats if s["avg"] is not None]
+    if not with_avg:
         return "<p class='empty'>No data yet — run ingest.py after your first export lands in incoming/.</p>"
 
-    latest = stats[-1]
-    prior_week = stats[-8:-1] if len(stats) >= 8 else stats[:-1]
+    latest = with_avg[-1]
+    prior_week = with_avg[-8:-1] if len(with_avg) >= 8 else with_avg[:-1]
 
     def delta_str(current, baseline_list, key):
-        if not baseline_list:
+        vals = [s[key] for s in baseline_list if s[key] is not None]
+        if not vals or current is None:
             return ""
-        baseline = round(statistics.mean(s[key] for s in baseline_list), 1)
+        baseline = round(statistics.mean(vals), 1)
         diff = round(current - baseline, 1)
         if diff == 0:
             return "same as your 7-day average"
@@ -295,12 +315,13 @@ def build_stat_tiles(stats):
 
     resting_delta = delta_str(latest["resting"], prior_week, "resting")
     avg_delta = delta_str(latest["avg"], prior_week, "avg")
+    resting_note = "" if latest["resting_is_real"] else " (est.)"
 
     total_days = len(stats)
     total_samples = sum(s["samples"] for s in stats)
 
     tiles = [
-        ("Latest resting HR (proxy)", f"{latest['resting']} bpm", resting_delta),
+        ("Latest resting HR" + resting_note, f"{latest['resting']} bpm", resting_delta),
         ("Latest daily average", f"{latest['avg']} bpm", avg_delta),
         ("Days tracked", str(total_days), ""),
         ("Total samples", f"{total_samples:,}", ""),
@@ -323,9 +344,7 @@ PAGE_TEMPLATE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Heart Rate Dashboard</title>
 <style>
-  :root {{
-    color-scheme: light;
-  }}
+  :root {{ color-scheme: light; }}
   .viz-root {{
     --surface-1:      #fcfcfb;
     --text-primary:   #0b0b0b;
@@ -468,10 +487,10 @@ PAGE_TEMPLATE = """<!doctype html>
 
   <section>
     <h2>Last 14 days — table view</h2>
-    <p class="section-note">Resting HR is an approximation (mean of the lowest ~10% of that day's samples), not Apple's own resting-HR algorithm.</p>
+    <p class="section-note">"Resting" uses Apple's own Resting Heart Rate reading when your export includes one for that day; a "~" marks days where none was available and an estimate (mean of the lowest ~10% of that day's samples) is shown instead.</p>
     <table>
       <thead>
-        <tr><th>Date</th><th>Avg</th><th>Min</th><th>Max</th><th>Resting~</th><th>Std dev</th><th>Samples</th></tr>
+        <tr><th>Date</th><th>Avg</th><th>Min</th><th>Max</th><th>Resting</th><th>Std dev</th><th>Samples</th></tr>
       </thead>
       <tbody>
         {table_rows}
@@ -496,8 +515,9 @@ def main():
     tiles_html = build_stat_tiles(stats)
     trend_chart = build_trend_chart(stats)
 
-    if stats:
-        latest_day = stats[-1]["date"]
+    days_with_hr = [s["date"] for s in stats if s["avg"] is not None]
+    if days_with_hr:
+        latest_day = days_with_hr[-1]
         latest_day_label = latest_day.strftime("%A, %B %d, %Y")
         intraday_chart = build_intraday_chart(rows, latest_day)
     else:
@@ -509,7 +529,7 @@ def main():
     html = PAGE_TEMPLATE.format(
         generated_at=datetime.now().strftime("%Y-%m-%d %H:%M"),
         tiles_html=tiles_html,
-        n_days=min(len(stats), MAX_DAYS_SHOWN),
+        n_days=min(len([s for s in stats if s["avg"] is not None]), MAX_DAYS_SHOWN),
         trend_chart=trend_chart,
         latest_day_label=latest_day_label,
         intraday_chart=intraday_chart,
