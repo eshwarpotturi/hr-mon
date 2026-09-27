@@ -45,6 +45,13 @@ this shortcut. `shortcut/build_shortcut.py` regenerates the file (macOS).
 
 After the workflow runs, `git pull` before working locally.
 
+## Report page
+
+**https://github.com/eshwarpotturi/hr-mon/tree/main/reports**: private
+(sign in as the repo owner), regenerated after every upload. Latest day vs
+your usual, this week vs last week, trend charts, highlights and every day
+compared with your overall average.
+
 ## Running by hand
 
 ```bash
@@ -63,6 +70,7 @@ hr-mon/
 ├── dashboard/
 │   └── index.html     <- open in a browser; regenerated each run
 ├── reports/
+│   ├── README.md          <- the report page: charts, comparisons, highlights
 │   ├── daily_stats.csv    <- one row per day (avg/min/max/resting/stdev/samples/7-day avg)
 │   └── YYYY-MM-DD.md      <- one summary per day
 ├── scripts/
