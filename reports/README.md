@@ -14,13 +14,7 @@
 
 Resting HR for this day is Apple's own resting reading. 152 readings. [Full day report](2026-09-28.md)
 
-```mermaid
-xychart-beta
-    title "Mon 28 Sep: average HR by hour"
-    x-axis ["10h", "11h", "12h", "13h", "14h", "15h", "16h", "17h", "18h", "19h", "20h"]
-    y-axis "bpm" 60 --> 110
-    bar [99.9, 88.5, 87.7, 92.7, 90.6, 96.4, 92.5, 78.8, 90.3, 89.7, 89.1]
-```
+![Every reading on Mon 28 Sep](latest_day.svg)
 
 ## This week vs last week
 
