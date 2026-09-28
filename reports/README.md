@@ -36,6 +36,10 @@ _Previous week has 0 of 7 days so far; the comparison is complete after 7 more d
 
 ## Trends
 
+**Every reading**: each dot is one heart-rate sample at its real time; gaps are when the watch wasn't recording. The orange line is Apple's resting HR for that day.
+
+![Every heart-rate reading](all_readings.svg)
+
 **Daily average** (bars) and **7-day rolling average** (line).
 
 ```mermaid

@@ -5,6 +5,7 @@ report.py
 Writes the daily stats to ../reports/ so they can be committed to git:
     reports/README.md         overview page: charts, comparisons, highlights
                               (GitHub shows it when you open reports/)
+    reports/all_readings.svg  every reading on a time axis (shown in README.md)
     reports/daily_stats.csv   one row per day, rewritten in full each run
     reports/YYYY-MM-DD.md     a short summary per day
 
@@ -18,6 +19,7 @@ Run:
 import csv
 import statistics
 from collections import defaultdict
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from build_dashboard import compute_daily_stats, load_master
@@ -26,6 +28,7 @@ BASE = Path(__file__).resolve().parent.parent
 REPORTS_DIR = BASE / "reports"
 CSV_PATH = REPORTS_DIR / "daily_stats.csv"
 OVERVIEW_PATH = REPORTS_DIR / "README.md"
+SCATTER_PATH = REPORTS_DIR / "all_readings.svg"
 CHART_DAYS = 30
 
 CSV_COLUMNS = [
@@ -116,6 +119,67 @@ def mermaid_chart(title, x_labels, y_label, series):
     return "\n".join(lines)
 
 
+def write_scatter_svg(rows, start_day):
+    """Every HR reading from start_day on, as a dot at its real time, plus
+    Apple's resting reading as a line across its day. Pure stdlib SVG."""
+    readings = [(ts, hr) for ts, hr, _ in rows if hr is not None and ts.date() >= start_day]
+    resting = [(ts, rhr) for ts, _, rhr in rows if rhr is not None and ts.date() >= start_day]
+    width, height = 1000, 360
+    left, right, top, bottom = 50, 20, 40, 40
+    plot_w, plot_h = width - left - right, height - top - bottom
+
+    t0 = datetime.combine(start_day, datetime.min.time())
+    t1 = datetime.combine(readings[-1][0].date(), datetime.min.time()) + timedelta(days=1)
+    span = (t1 - t0).total_seconds()
+    values = [hr for _, hr in readings] + [rhr for _, rhr in resting]
+    lo = max(int(min(values) // 10 * 10) - 10, 0)
+    hi = int(max(values) // 10 * 10) + 20
+
+    def x(ts):
+        return round(left + (ts - t0).total_seconds() / span * plot_w, 1)
+
+    def y(bpm):
+        return round(top + (hi - bpm) / (hi - lo) * plot_h, 1)
+
+    title = "Every heart-rate reading"
+    out = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}" font-family="sans-serif" font-size="11">',
+        f"<title>{title}</title>",
+        f'<rect width="{width}" height="{height}" fill="#ffffff"/>',
+        f'<text x="{left}" y="20" font-size="14" font-weight="bold" fill="#222">{title}</text>',
+        f'<text x="{left - 36}" y="{top - 8}" fill="#555">bpm</text>',
+    ]
+    for bpm in range((lo + 19) // 20 * 20, hi + 1, 20):
+        out += [f'<line x1="{left}" x2="{width - right}" y1="{y(bpm)}" y2="{y(bpm)}" stroke="#e5e5e5"/>',
+                f'<text x="{left - 6}" y="{y(bpm) + 4}" text-anchor="end" fill="#555">{bpm}</text>']
+    days = (t1 - t0).days
+    step = 1 if days <= 14 else 2
+    for i in range(days + 1):
+        day = t0 + timedelta(days=i)
+        out.append(f'<line x1="{x(day)}" x2="{x(day)}" y1="{top}" y2="{top + plot_h}" stroke="#d0d0d0"/>')
+        if i < days and i % step == 0:
+            mid = x(day + timedelta(hours=12))
+            out.append(f'<text x="{mid}" y="{top + plot_h + 16}" text-anchor="middle" '
+                       f'fill="#555">{day:%d %b}</text>')
+    for ts, rhr in resting:
+        day = datetime.combine(ts.date(), datetime.min.time())
+        out.append(f'<line x1="{x(day)}" x2="{x(day + timedelta(days=1))}" y1="{y(rhr)}" '
+                   f'y2="{y(rhr)}" stroke="#e8590c" stroke-width="2"/>')
+    out.append('<g fill="#2a6fdb" fill-opacity="0.45">')
+    out += [f'<circle cx="{x(ts)}" cy="{y(hr)}" r="2"/>' for ts, hr in readings]
+    out.append("</g>")
+    lx = width - right - 260
+    out += [
+        f'<circle cx="{lx}" cy="16" r="3" fill="#2a6fdb"/>',
+        f'<text x="{lx + 8}" y="20" fill="#333">Heart rate reading</text>',
+        f'<line x1="{lx + 125}" x2="{lx + 141}" y1="16" y2="16" stroke="#e8590c" stroke-width="2"/>',
+        f'<text x="{lx + 147}" y="20" fill="#333">Apple resting HR</text>',
+        "</svg>", "",
+    ]
+    SCATTER_PATH.write_text("\n".join(out))
+
+
 def hourly_averages(rows, day):
     by_hour = defaultdict(list)
     for ts, hr, _rhr in rows:
@@ -197,8 +261,13 @@ def write_overview(stats, rows):
 
     shown = hr_days[-CHART_DAYS:]
     x = [f"{s['date']:%d %b}" for s in shown]
+    write_scatter_svg(rows, shown[0]["date"])
     out += [
         "## Trends", "",
+        "**Every reading**: each dot is one heart-rate sample at its real time; "
+        "gaps are when the watch wasn't recording. The orange line is Apple's "
+        "resting HR for that day.", "",
+        f"![Every heart-rate reading]({SCATTER_PATH.name})", "",
         "**Daily average** (bars) and **7-day rolling average** (line).", "",
         mermaid_chart("Daily average heart rate", x, "bpm",
                       [("bar", [s["avg"] for s in shown]),
